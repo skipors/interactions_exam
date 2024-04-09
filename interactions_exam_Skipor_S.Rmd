@@ -1,0 +1,752 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+##################################################################################
+#
+#--------------Replicating the paper Cong 2022 + Testing the validity------------# 
+##Sofiia Skipor
+##2024/04/09
+#
+##################################################################################
+
+#Libraries 
+```{r}
+library(interplot)
+library(marginaleffects)
+library(readxl)
+library(dplyr)
+library(interflex)
+library(fastDummies)
+library(psych)
+library(ggplot2)
+library(stringr)
+```
+
+#Getting the data 
+```{r}
+#Loading the dataset and getting the variables of interest 
+setwd()
+d <- read_xlsx("fema2017_raw.xlsx")
+
+d <- d |> 
+  select(ST_STG1, A1, D7, D4_1, D6, GENEXP1, C1, 
+         C2, QNSC6, QNSC7, D2, D8, D4A)
+
+#Removing DK/don't know and Refused
+d <- d  |> 
+  mutate_all(~ ifelse(grepl("\\(DK\\)|\\(REFUSED\\)|\\(DK/REFUSED\\)", .), NA, .))
+
+#Dropping DK/Refused as they are not reasonable to impute
+d <- d[complete.cases(d), ] #n = 4501
+d <- as.data.frame(d)
+```
+
+#Dealing w/ variables, cleaning the dataset to use 
+```{r}
+#Renaming variables 
+names(d) <- c("preparedness", "information_access", "cr_elderly", "race",
+              "cr_kids", "experience", "response_efficacy", "self_efficacy", 
+              "age", "gender", "education", "homeownership", "disability")
+
+#Transforming the DV values into numeric values
+library(stringr)
+
+d <- d |> 
+  mutate(preparedness = case_when(
+    str_detect(preparedness, "NOT PREPARED, AND I DO NOT INTEND") ~ 1,
+    str_detect(preparedness, "NOT PREPARED, BUT I INTEND TO PREPARE IN THE NEXT YEAR") ~ 2,
+    str_detect(preparedness, "NOT PREPARED, BUT I INTEND TO PREPARE IN THE NEXT SIX MONTHS") ~ 3,
+    str_detect(preparedness, "HAVE BEEN PREPARED FOR THE LAST YEAR") ~ 4,
+    str_detect(preparedness, "HAVE BEEN PREPARING FOR MORE THAN A YEAR") ~ 5,
+    TRUE ~ NA_real_
+  ))  |> 
+  mutate(preparedness = as.numeric(preparedness))
+
+#Yes/no responses transforming into numerical variables 
+d <- d  |> 
+  mutate(across(c("information_access", "cr_elderly", "experience", "disability"), ~ as.integer(. %in% c("YES", "1"))))
+
+#Age
+d <- d |>
+  mutate(age = ifelse(age == "99 OR OLDER", 99, as.numeric(age)))
+
+#Gender
+d <- d |> 
+  mutate(gender = as.numeric(case_when(
+    gender == "MALE" ~ 0,
+    gender == "FEMALE" ~ 1
+  )))
+
+#Education
+d <- d |> 
+  mutate(education = as.numeric(case_when(
+    education == "LESS THAN HIGH SCHOOL DIPLOMA" ~ 1,
+    education == "HIGH SCHOOL DEGREE OR DIPLOMA" ~ 2,
+    education == "TECHNICAL/VOCATIONAL SCHOOL" ~ 3,
+    education == "SOME COLLEGE" ~ 4,
+    education == "COLLEGE GRADUATE" ~ 5,
+    education == "POST GRADUATE WORK OR DEGREE" ~ 6
+  )))
+
+#Rent/own
+d <- d |> 
+  mutate(homeownership = as.numeric(case_when(
+    homeownership == "RENT" ~ 1,
+    homeownership == "OWN" ~ 2,
+    grepl("\\\\(OTHER)\\\\", homeownership) ~ 0
+  ))) 
+
+#Response efficacy 
+d <- d |> 
+  mutate(response_efficacy  = as.numeric(case_when(
+    response_efficacy == "NOT AT ALL" ~ 1,
+    response_efficacy == "VERY LITTLE" ~ 2,
+    response_efficacy == "SOMEWHAT" ~ 3,
+    response_efficacy == "QUITE A BIT" ~ 4,
+    response_efficacy == "A GREAT DEAL" ~ 5  
+    )))
+
+#Self-efficacy
+d <- d |> 
+  mutate(self_efficacy = as.numeric(case_when(
+    self_efficacy == "NOT AT ALL CONFIDENT" ~ 1,
+    self_efficacy == "SLIGHTLY CONFIDENT" ~ 2,
+    self_efficacy == "SOMEWHAT CONFIDENT" ~ 3,
+    self_efficacy == "MODERATELY CONFIDENT" ~ 4,
+    self_efficacy == "EXTREMELY CONFIDENT" ~ 5  
+    )))
+
+#Caregiving responsibility for children
+d <- d |>
+  mutate(cr_kids = ifelse(cr_kids == "01-", 1, 
+                          ifelse(cr_kids == "NONE", 0, as.numeric(cr_kids)))) 
+
+#Dichotomizing the cr_kids variable to replicate the analyses
+d <- d  |> 
+  mutate(cr_kids_d = if_else(cr_kids == 0, 0, 1))
+
+#Dealing with the Race variable 
+d <- d |>
+  mutate(
+    race = factor(case_when(
+      race == "ASIAN" ~ "Asian",
+      race == "WHITE" ~ "White",
+      race == "BLACK OR AFRICAN-AMERICAN" ~ "Black_African_American",
+      race == "AMERICAN INDIAN OR ALASKA NATIVE, OR" ~ "Native_American",
+      race == "NATIVE HAWAIIAN OR PACIFIC ISLANDER" ~ "Native_American",
+      TRUE ~ as.character(race)  
+    )),
+    race_numeric = as.integer(factor(race, levels = c("Asian", "White", "Black_African_American", "Native_American")))
+  )
+
+#Getting rid of NAs that formed along the way of transforming the data -- some nonsensical values outside of the range
+d <- d[complete.cases(d), ] #n = 4316
+```
+
+#Descriptives
+```{r}
+#Basic descriptives and values range for the sample 
+describe(d)
+
+#Bar plot for the paper/Race variable 
+ggplot(d, aes(x = as.factor(race), fill = as.factor(race) )) + 
+  geom_bar( ) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position = "none") + 
+  labs(x = "Race", y = "Count") +
+  theme_classic()
+
+#Caregiving children distribution
+kids_table <- table(d$cr_kids_d)
+print(kids_table)
+kids_percentages <- kids_table / sum(kids_table) * 100
+print(kids_percentages) 
+
+#Caregiving elderly/disabled distribution
+elderly_table <- table(d$cr_elderly)
+print(elderly_table)
+elderly_percentages <- elderly_table / sum(elderly_table) * 100
+print(elderly_percentages) 
+
+#Gender distribution
+gender_table <- table(d$gender)
+gender_percentages <- gender_table / sum(gender_table) * 100
+print(gender_percentages)  #48.2% females
+
+#Race distribution
+race_table <- table(d$race)
+print(race_table)
+race_percentages <- race_table / sum(race_table) * 100
+print(race_percentages) 
+
+#Access to information distribution
+info_table <- table(d$information_access)
+print(info_table)
+info_percentages <- info_table / sum(info_table) * 100
+print(info_percentages) 
+
+#Education level distribution
+edu_table <- table(d$education)
+print(edu_table)
+edu_percentages <- edu_table / sum(edu_table) * 100
+print(edu_percentages) 
+
+#Home ownership distribution
+own_table <- table(d$homeownership)
+print(own_table)
+own_percentages <- own_table / sum(own_table) * 100
+print(own_percentages) 
+
+#Previous disaster exposure distribution
+experience_table <- table(d$experience)
+experience_percentages <- experience_table / sum(experience_table) * 100
+print(experience_percentages) 
+
+#Replicating contingency tables and chi2 for Care for children x Race
+contingency_table <- table(d$race, d$cr_kids_d)
+chi_test <- chisq.test(contingency_table)
+print(contingency_table)
+print(chi_test)
+
+#Replicating contingency tables and chi2 for Care for elderly x Race
+contingency_table1 <- table(d$race, d$cr_elderly)
+chi_test1 <- chisq.test(contingency_table1)
+print(contingency_table1)
+print(chi_test1)
+
+#Quick visualizing the proportions Care for children x Race
+ggplot(d, aes(x = race, fill = cr_kids_d)) +
+  geom_bar(position = "fill") + 
+  labs(x = "Race", y = "Proportion", fill = "Caring for Kids") +
+  theme_classic()
+
+#Quick visualizing the proportions Care for elderly x Race
+ggplot(d, aes(x = race, fill = cr_elderly)) +
+  geom_bar(position = "fill") + 
+  labs(x = "Race", y = "Proportion", fill = "Caring for Elderly") +
+  theme_classic()
+
+#Quick visualizing Preparedness by Race
+boxplot(preparedness ~ race, data = d, col = "seagreen") 
+
+#Quick visualizing Preparedness by Care for children
+boxplot(preparedness ~ cr_kids_d, data = d, col = "orange") 
+
+#Quick visualizing Preparedness by Care for children
+boxplot(preparedness ~ cr_elderly, data = d, col = "steelblue") 
+```
+
+
+#Preparing variables for running the models  
+```{r}
+#Converting variables to factors 
+d <- d  |> 
+  mutate(across(c(information_access, cr_elderly, experience, 
+                  gender, homeownership, disability, cr_kids_d), as.factor))
+
+#Converting vars to numeric 
+d <- d  |> 
+  mutate(across(c(response_efficacy, self_efficacy, age),
+                as.numeric))
+
+#Creating new dummy variables  
+library(fastDummies)
+d <- dummy_cols(d, select_columns = 'race', remove_selected_columns = FALSE)
+d <- d  |> 
+  mutate(across(c(race_Asian, race_White, race_Black_African_American,
+                  race_Native_American), as.factor))
+```
+
+#Replicating the models w/ the dummy variables approach for race/ref=Asian
+```{r}
+#Model 1
+m1 <- lm(preparedness ~ information_access + cr_elderly + 
+           race_Black_African_American + race_Native_American + race_White +
+           cr_kids_d + experience + response_efficacy + self_efficacy + age +
+           gender + education + homeownership + disability, 
+           data = d)
+
+summary(m1)
+
+#Model 2
+m2 <- lm(preparedness ~ cr_kids_d*race_White +
+           cr_kids_d*race_Black_African_American +
+           cr_kids_d*race_Native_American + cr_elderly +
+           information_access + experience + response_efficacy + self_efficacy +
+           age + gender + education + homeownership + disability,
+           data = d)
+
+summary(m2)
+coef(m2)
+
+#Model 3
+m3 <- lm(preparedness ~ cr_elderly*race_White +
+           cr_elderly*race_Black_African_American + 
+           cr_elderly*race_Native_American + information_access + cr_kids_d +
+           experience + response_efficacy + self_efficacy + age + gender +
+           education + homeownership + disability, 
+           data = d)
+
+summary(m3)
+
+#Model 4/both interactions in the model 
+m4 <- lm(preparedness ~ cr_kids_d*race_White + 
+           cr_kids_d*race_Black_African_American + cr_kids_d*race_Native_American +
+           cr_elderly*race_White + cr_elderly*race_Black_African_American + 
+           cr_elderly*race_Native_American + information_access + 
+           experience + response_efficacy + self_efficacy + age + gender +
+           education + homeownership + disability, 
+           data = d)
+
+summary(m4)
+```
+
+#Tables 
+```{r}
+#Model 2
+library(rempsyc)
+#Gathering summary statistics
+stats.table_m2 <- as.data.frame(summary(m2)$coefficients)
+#CIs
+CI_m2 <- confint(m2)
+#Adding a row to join the variables names and CI to the stats
+stats.table_m2 <- cbind(row.names(stats.table_m2), stats.table_m2, CI_m2)
+#Renaming the columns
+names(stats.table_m2) <- c("Variables", "B", "SE", "t", "p", "CI_lower", "CI_upper")
+#Getting an APA7 publication standard table 
+t_m2 <- nice_table(stats.table_m2, stars = FALSE)
+print(t_m2, preview = "docx")
+
+#Model 3
+#Gathering summary statistics
+stats.table_m3 <- as.data.frame(summary(m3)$coefficients)
+#CIs
+CI_m3 <- confint(m3)
+#Adding a row to join the variables names and CI to the stats
+stats.table_m3 <- cbind(row.names(stats.table_m3), stats.table_m3, CI_m3)
+#Renaming the columns
+names(stats.table_m3) <- c("Variables", "B", "SE", "t", "p", "CI_lower", "CI_upper")
+#Getting an APA7 publication standard table 
+t_m3 <- nice_table(stats.table_m3, stars = FALSE)
+print(t_m3, preview = "docx")
+```
+
+#Plotting relationships 
+```{r}
+#Slopes plots Caregiver_children x Race
+plot_slopes(m2, variables = "cr_kids_d", condition = "race_White") 
+plot_slopes(m2, variables = "cr_kids_d", condition = "race_Black_African_American")
+plot_slopes(m2, variables = "cr_kids_d", condition = "race_Native_American")
+
+#Predictions plots Caregiver_children x Race
+plot_predictions(m2, condition = c("cr_kids_d","race_White")) + theme_classic()
+plot_predictions(m2, condition = c("cr_kids_d","race_Black_African_American")) +
+  theme_classic()
+plot_predictions(m2, condition = c("cr_kids_d","race_Native_American")) + 
+  theme_classic()
+
+#Slopes plots Caregiver_elderly x Race
+plot_slopes(m3, variables = "cr_elderly", condition = "race_White")
+plot_slopes(m3, variables = "cr_elderly", condition ="race_Black_African_American")
+plot_slopes(m3, variables = "cr_elderly", condition = "race_Native_American")
+
+#Predictions plots Caregiver_elderly x Race
+plot_predictions(m3, condition = c("cr_elderly","race_White"))
+plot_predictions(m3, condition = c("cr_elderly","race_Black_African_American"))
+plot_predictions(m3, condition = c("cr_elderly","race_Native_American"))
+
+#Transforming Caregiving treatment variables, otherwise cannot run the following plots
+d$cr_kids_d <- as.numeric(as.character(d$cr_kids_d))
+d$cr_elderly <- as.numeric(as.character(d$cr_elderly))
+
+#Raw plot Caregiver_children x Race/White    
+interflex(estimator = "raw",  Y = "preparedness", D = "race_White", 
+          X = "cr_kids_d",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_children x Race/White
+binning_est <- interflex(estimator = "binning", Y = "preparedness", 
+                         D = "race_White", X = "cr_kids_d",
+          data = d, 
+          main = "Binning Plot",
+          show.grid = FALSE,
+          treat.type = c("discrete"),
+          Ylabel = "preparedness", Dlabel = "cr_kids", Xlabel = "White",
+          Z = c("experience", "response_efficacy", "self_efficacy", "age",
+                "gender", "education", "homeownership", "disability",
+                "cr_elderly")) 
+binning_est
+
+#Kernel estimator Caregiver_children x Race/White
+kernel_est <- interflex(estimator = "kernel", Y = "preparedness", 
+                         D = "race_White", X = "cr_kids_d",
+          data = d, 
+          main = "Kernel Plot",
+          show.grid = FALSE,
+          Ylabel = "preparedness", Dlabel = "cr_kids", Xlabel = "White",
+          Z = c("experience", "response_efficacy", "self_efficacy", "age",
+                "gender", "education", "homeownership", "disability",
+                "cr_elderly")) 
+kernel_est
+
+#Raw plot Caregiver_children x Race/Black or African-American
+interflex(estimator = "raw",  Y = "preparedness", 
+          D = "race_Black_African_American", 
+          X = "cr_kids_d",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_children x Race/Black or African-American
+binning_est1 <- interflex(estimator = "binning", Y = "preparedness", 
+                          D = "race_Black_African_American", 
+                          X = "cr_kids_d",
+                          data = d, 
+                          show.grid = FALSE,
+                          main = "Binning Plot",
+                          Ylabel = "preparedness", Dlabel = "cr_kids", 
+                          Xlabel = "Black or African-American",
+                           Z = c("experience", "response_efficacy",
+                                 "self_efficacy", "age",
+                                 "gender", "education", "homeownership",
+                                 "disability", "cr_elderly")) 
+
+binning_est1
+
+#Kernel estimator Caregiver_children x Race/Black or African-American
+kernel_est1 <- interflex(estimator = "kernel", Y = "preparedness", 
+                         D = "race_Black_African_American", X = "cr_kids_d",
+          data = d, 
+          main = "Kernel Plot",
+          show.grid = FALSE,
+          Ylabel = "preparedness", Dlabel = "cr_kids", Xlabel = "Black or
+          African-American",
+          Z = c("experience", "response_efficacy", "self_efficacy", "age",
+                "gender", "education", "homeownership", "disability",
+                "cr_elderly")) 
+kernel_est1
+
+#Raw plot Caregiver_children x Race/Native American
+interflex(estimator = "raw",  Y = "preparedness", 
+          D = "race_Native_American", 
+          X = "cr_kids_d",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_children x Race/Native American
+binning_est2 <- interflex(estimator = "binning", Y = "preparedness", 
+                          D = "race_Native_American", 
+                          X = "cr_kids_d",
+                          data = d, 
+                          show.grid = FALSE,
+                          main = "Binning Plot",
+                          Ylabel = "preparedness", Dlabel = "cr_kids", 
+                          Xlabel = "Native American",
+                            Z = c("experience", "response_efficacy",
+                                 "self_efficacy", "age",
+                                 "gender", "education", "homeownership",
+                                 "disability", "cr_elderly")) 
+
+binning_est2
+
+#Kernel estimator Caregiver_children x Race/Native American
+kernel_est2 <- interflex(estimator = "kernel", Y = "preparedness", 
+                         D = "race_Native_American", X = "cr_kids_d",
+          data = d, 
+          main = "Kernel Plot",
+          show.grid = FALSE,
+          Ylabel = "preparedness", Dlabel = "cr_kids", Xlabel = "Native American",
+          Z = c("experience", "response_efficacy", "self_efficacy", "age",
+                "gender", "education", "homeownership", "disability",
+                "cr_elderly")) 
+kernel_est2
+
+#----------------Caregiver_elderly plots ------------------------------#
+
+#Raw plot Caregiver_elderly x Race/White    
+interflex(estimator = "raw",  Y = "preparedness", D = "race_White", 
+          X = "cr_elderly",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_elderly x Race/White
+binning_est3 <- interflex(estimator = "binning", Y = "preparedness", 
+                         D = "race_White", X = "cr_elderly",
+                         data = d, main = "Binning Plot",
+                         Ylabel = "preparedness", Dlabel = "cr_elderly", 
+                         Xlabel = "race", 
+                         Z = c("experience", "response_efficacy", "self_efficacy",
+                               "age", "gender", "education", "homeownership",
+                               "disability"))
+
+binning_est3
+
+#Raw plot Caregiver_elderly x Race/Black or African-American
+interflex(estimator = "raw",  Y = "preparedness", 
+          D = "race_Black_African_American", 
+          X = "cr_elderly",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_elderly x Race/Black or African-American
+binning_est4 <- interflex(estimator = "binning", Y = "preparedness", 
+                          D = "race_Black_African_American", 
+                          X = "cr_elderly",
+                          data = d, 
+                          main = "Binning Plot",
+                          Ylabel = "preparedness", Dlabel = "cr_elderly", 
+                          Xlabel = "race",
+                          Z = c("experience", "response_efficacy", "self_efficacy",
+                                "age", "gender", "education", "homeownership",
+                                "disability"))
+
+binning_est4
+
+#Raw plot Caregiver_elderly x Race/Native American
+interflex(estimator = "raw",  Y = "preparedness", 
+          D = "race_Native_American", 
+          X = "cr_elderly",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_elderly x Race/Native American
+binning_est5 <- interflex(estimator = "binning", Y = "preparedness", 
+                          D = "race_Native_American", 
+                          X = "cr_elderly",
+                          data = d, 
+                          main = "Binning Plot",
+                          Ylabel = "preparedness", Dlabel = "cr_elderly", 
+                          Xlabel = "race",
+                          Z = c("experience", "response_efficacy", "self_efficacy",
+                                "age", "gender", "education", "homeownership",
+                                "disability"))
+
+binning_est5
+```
+
+#Influential cases diagnostics 
+```{r}
+library(car)
+#Bubble plot of Studentized residuals versus hat values and Cook's distance
+influencePlot(m1)
+influencePlot(m2)
+influencePlot(m3)
+influencePlot(m4)
+```
+
+###############################################################################
+##__________________________Robustness checks________________________________##
+###############################################################################
+
+#Dichotomizing the race variable to overcome the common support problem 
+```{r}
+#Asian vs Non-Asian 
+d <- d |> 
+  mutate(non_asian = case_when(
+    race == "Asian" ~ 0,  
+    TRUE ~ 1              
+  ))
+
+d$non_asian <- as.factor(d$non_asian)
+
+library(fastDummies)
+d <- dummy_cols(d, select_columns = 'non_asian', remove_selected_columns = FALSE)
+```
+
+#Fitting the models with the new dichotomized variable 
+```{r}
+#Asian vs Non-Asian model
+m2c <- lm(preparedness ~ cr_kids_d*non_asian_1 + information_access + experience +
+            response_efficacy + self_efficacy + cr_elderly + 
+            age + gender + education + homeownership + disability, 
+            data = d)
+
+summary(m2c) 
+confint(m2c)
+```
+
+#Plotting the dichotomized moderator model 
+```{r}
+#Raw plot Caregiver_children x Race_Asian vs Non-Asian 
+interflex(estimator = "raw",  Y = "preparedness", D = "non_asian_1", 
+          X = "cr_kids_d",
+          data = d, 
+          main = "Raw Plot")
+
+#Binning estimator Caregiver_children x Race_Asian vs Non-Asian 
+b_e <- interflex(estimator = "binning", Y = "preparedness", D = "non_asian_1", 
+                          X = "cr_kids_d",
+          data = d, 
+          main = "Binning Plot",
+          Ylabel = "preparedness", Dlabel = "non_asian", Xlabel = "cr_kids",
+          Z = c("experience", "response_efficacy", "self_efficacy", "age", 
+                "gender", "education", "homeownership", "disability",
+                "cr_elderly"))
+
+b_e
+
+#Kernel estimator Caregiver_children x Race_Asian vs Non-Asian 
+k_e <- interflex(estimator = "kernel", Y = "preparedness", D = "non_asian_1", 
+                          X = "cr_kids_d",
+          data = d, 
+          main = "Kernel Plot",
+          Ylabel = "preparedness", Dlabel = "non_asian", Xlabel = "cr_kids",
+          Z = c("experience", "response_efficacy", "self_efficacy", "age", 
+                "gender", "education", "homeownership", "disability", 
+                "cr_elderly"))
+
+k_e
+```
+
+#Fitting Model 2 with another similar outcome 
+#Preparing the data
+```{r}
+#Loading the dataset and getting the variables of interest 
+setwd()
+d1 <- read_xlsx("fema2017_raw.xlsx")
+
+d1 <- d1 |> 
+  select(E2, A1, D7, D4_1, D6, GENEXP1, C1, 
+         C2, QNSC6, QNSC7, D2, D8, D4A)
+
+#Removing DK/don't know and Refused
+d1 <- d1  |> 
+  mutate_all(~ ifelse(grepl("\\(DK\\)|\\(REFUSED\\)|\\(DK/REFUSED\\)", .), NA, .))
+
+#Dropping DK/Refused as they are not reasonable to impute
+d1 <- d1[complete.cases(d1), ] #n = 4452
+d1 <- as.data.frame(d1)
+
+#Renaming variables 
+names(d1) <- c("preparedness", "information_access", "cr_elderly", "race",
+              "cr_kids", "experience", "response_efficacy", "self_efficacy", 
+              "age", "gender", "education", "homeownership", "disability")
+
+#Transforming one of the DVs into numeric values
+d1$preparedness[d1$preparedness == "I AM NOT PLANNING TO DO ANYTHING ABOUT PREPARING"] <- 0
+d1$preparedness[d1$preparedness == "I HAVE NOT YET PREPARED, BUT I INTEND TO IN THE NEXT SIX MONTHS"] <- 1
+d1$preparedness[d1$preparedness == "I HAVE NOT YET PREPARED, BUT I INTEND TO IN THE NEXT MONTH"] <- 2
+d1$preparedness[d1$preparedness == "I JUST RECENTLY BEGAN PREPARING"] <- 3
+d1$preparedness[d1$preparedness == "I HAVE BEEN PREPARED FOR AT LEAST THE PAST SIX MONTHS"] <- 4
+
+#Yes/no responses transforming into numerical variables 
+d1 <- d1  |> 
+  mutate(across(c("information_access", "cr_elderly", "experience", "disability"), ~ as.integer(. %in% c("YES", "1"))))
+
+#Age
+d1 <- d1 |>
+  mutate(age = ifelse(age == "99 OR OLDER", 99, as.numeric(age)))
+
+#Gender
+d1 <- d1 |> 
+  mutate(gender = as.numeric(case_when(
+    gender == "MALE" ~ 0,
+    gender == "FEMALE" ~ 1
+  )))
+
+#Education
+d1 <- d1 |> 
+  mutate(education = as.numeric(case_when(
+    education == "LESS THAN HIGH SCHOOL DIPLOMA" ~ 1,
+    education == "HIGH SCHOOL DEGREE OR DIPLOMA" ~ 2,
+    education == "TECHNICAL/VOCATIONAL SCHOOL" ~ 3,
+    education == "SOME COLLEGE" ~ 4,
+    education == "COLLEGE GRADUATE" ~ 5,
+    education == "POST GRADUATE WORK OR DEGREE" ~ 6
+  )))
+
+#Rent/own
+d1 <- d1 |> 
+  mutate(homeownership = as.numeric(case_when(
+    homeownership == "RENT" ~ 1,
+    homeownership == "OWN" ~ 2,
+    grepl("\\\\(OTHER)\\\\", homeownership) ~ 0
+  ))) 
+
+#Response efficacy 
+d1 <- d1 |> 
+  mutate(response_efficacy  = as.numeric(case_when(
+    response_efficacy == "NOT AT ALL" ~ 1,
+    response_efficacy == "VERY LITTLE" ~ 2,
+    response_efficacy == "SOMEWHAT" ~ 3,
+    response_efficacy == "QUITE A BIT" ~ 4,
+    response_efficacy == "A GREAT DEAL" ~ 5  
+    )))
+
+#Self-efficacy
+d1 <- d1 |> 
+  mutate(self_efficacy = as.numeric(case_when(
+    self_efficacy == "NOT AT ALL CONFIDENT" ~ 1,
+    self_efficacy == "SLIGHTLY CONFIDENT" ~ 2,
+    self_efficacy == "SOMEWHAT CONFIDENT" ~ 3,
+    self_efficacy == "MODERATELY CONFIDENT" ~ 4,
+    self_efficacy == "EXTREMELY CONFIDENT" ~ 5  
+    )))
+
+#Caregiving responsibility for children
+d1 <- d1 |>
+  mutate(cr_kids = ifelse(cr_kids == "01-", 1, 
+                          ifelse(cr_kids == "NONE", 0, as.numeric(cr_kids)))) 
+
+#Dichotomizing the cr_kids variable to replicate the analyses
+d1 <- d1  |> 
+  mutate(cr_kids_d = if_else(cr_kids == 0, 0, 1))
+
+#Dealing with the Race variable 
+d1 <- d1 |>
+  mutate(
+    race = factor(case_when(
+      race == "ASIAN" ~ "Asian",
+      race == "WHITE" ~ "White",
+      race == "BLACK OR AFRICAN-AMERICAN" ~ "Black_African_American",
+      race == "AMERICAN INDIAN OR ALASKA NATIVE, OR" ~ "Native_American",
+      race == "NATIVE HAWAIIAN OR PACIFIC ISLANDER" ~ "Native_American",
+      TRUE ~ as.character(race)  
+    )),
+    race_numeric = as.integer(factor(race, levels = c("Asian", "White", "Black_African_American", "Native_American")))
+  )
+
+#Getting rid of NAs 
+d1 <- d1[complete.cases(d1), ] #n=4270
+
+#Converting variables to factors 
+d1 <- d1  |> 
+  mutate(across(c(information_access, cr_elderly, experience, 
+                  gender, homeownership, disability, cr_kids_d), as.factor))
+
+#Converting vars to numeric 
+d1 <- d1  |> 
+  mutate(across(c(response_efficacy, self_efficacy, age),
+                as.numeric))
+
+#Creating new dummy variables  
+library(fastDummies)
+d1 <- dummy_cols(d1, select_columns = 'race', remove_selected_columns = FALSE)
+d1 <- d1  |> 
+  mutate(across(c(race_Asian, race_White, race_Black_African_American,
+                  race_Native_American), as.factor))
+```
+
+```{r}
+#Model 1
+model1 <- lm(preparedness ~ information_access + cr_elderly + 
+           race_Black_African_American + race_Native_American + race_White +
+           cr_kids_d + experience + response_efficacy + self_efficacy + age +
+           gender + education + homeownership + disability, 
+           data = d1)
+
+summary(model1)
+
+#Model 2
+model2 <- lm(preparedness ~ cr_kids_d*race_White +
+           cr_kids_d*race_Black_African_American +
+           cr_kids_d*race_Native_American + cr_elderly +
+           information_access + experience + response_efficacy + self_efficacy +
+           age + gender + education + homeownership + disability,
+           data = d1)
+
+summary(model2)
+coef(model2)
+```
+
